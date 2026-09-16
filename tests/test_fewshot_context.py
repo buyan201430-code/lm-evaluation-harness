@@ -854,3 +854,75 @@ def test_fewshot_config_split_precedence():
         fewshot_config={"process_docs": None},
     )
     assert cfg_inherit.fewshot_config.split == "validation"
+
+
+# =============================================================================
+# Few-shot pool resolving to the evaluated split (#4145)
+# =============================================================================
+
+
+def _split_task(splits: dict[str, int], **overrides) -> ConfigurableTask:
+    import datasets
+
+    def build(**_):
+        return datasets.DatasetDict(
+            {
+                name: datasets.Dataset.from_list(
+                    [{"q": f"{name}-Q{i}", "a": f"{name}-A{i}"} for i in range(n)]
+                )
+                for name, n in splits.items()
+            }
+        )
+
+    config = {
+        "task": "fewshot_pool_demo",
+        "custom_dataset": build,
+        "output_type": "generate_until",
+        "doc_to_text": "{{q}}",
+        "doc_to_target": "{{a}}",
+        "target_delimiter": " ",
+        "fewshot_delimiter": "\n\n",
+        **overrides,
+    }
+    return ConfigurableTask(config=config)
+
+
+def _docs_shown_their_own_gold(task: ConfigurableTask, num_fewshot: int) -> int:
+    leaked = 0
+    for doc in task.eval_docs:
+        context = task.fewshot_context(doc, num_fewshot=num_fewshot)
+        demonstrations = context.rsplit(doc["q"], 1)[0]
+        leaked += f"{doc['q']} {doc['a']}" in demonstrations
+    return leaked
+
+
+@pytest.mark.parametrize(
+    ("splits", "overrides"),
+    [
+        # no fewshot_split: the pool falls back to the test split
+        ({"test": 5}, {"test_split": "test"}),
+        # explicit fewshot_split equal to the evaluated split (existing behaviour)
+        ({"test": 5}, {"test_split": "test", "fewshot_split": "test"}),
+        # validation-only task: validation is both the eval split and the pool
+        ({"validation": 5}, {"validation_split": "validation"}),
+    ],
+    ids=["fallback-to-test", "explicit-test", "fallback-to-validation"],
+)
+def test_fewshot_never_shows_the_evaluated_doc(splits, overrides):
+    # num_fewshot = n - 1: without exclusion every sample omits exactly one doc,
+    # so most evaluated docs see their own gold answer as a demonstration.
+    task = _split_task(splits, num_fewshot=4, **overrides)
+
+    assert _docs_shown_their_own_gold(task, num_fewshot=4) == 0
+
+
+def test_fewshot_from_a_different_split_is_not_filtered():
+    task = _split_task(
+        {"train": 4, "test": 5},
+        training_split="train",
+        test_split="test",
+        num_fewshot=4,
+    )
+
+    context = task.fewshot_context(task.eval_docs[0], num_fewshot=4)
+    assert context.count("train-Q") == 4
