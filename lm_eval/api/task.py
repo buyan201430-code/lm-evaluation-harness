@@ -615,6 +615,28 @@ class Task(abc.ABC):
         return getattr(self.config, "task", None) or random_task_id()
 
 
+def _fewshot_pool_is_eval_split(config, fewshot_cfg) -> bool:
+    """Whether few-shot examples are drawn from the split being evaluated.
+
+    Compares the split ``ConfigurableTask.fewshot_docs()`` actually resolves to,
+    not the configured ``fewshot_split``: with no ``fewshot_split`` the pool falls
+    back to train, then validation, then test, so a test-only task would otherwise
+    sample the evaluated document as its own demonstration (#4145).
+    """
+    if (split := fewshot_cfg.split) is None:
+        if config.fewshot_config is not None and fewshot_cfg.samples is not None:
+            return False
+        if config.training_split is not None:
+            split = config.training_split
+        elif config.validation_split is not None:
+            split = config.validation_split
+        else:
+            split = config.test_split
+    if config.test_split is not None:
+        return split == config.test_split
+    return split == config.validation_split
+
+
 class ConfigurableTask(Task):
     VERSION = "Yaml"
     OUTPUT_TYPE = None
@@ -983,6 +1005,7 @@ class ConfigurableTask(Task):
                 n=num_fewshot,
                 eval_doc=doc
                 if self.fewshot_cfg.split == self.config.test_split
+                or _fewshot_pool_is_eval_split(self.config, self.fewshot_cfg)
                 else None,
             ):
                 q, c, a = (
